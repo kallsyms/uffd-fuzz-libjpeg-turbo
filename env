@@ -1,0 +1,2 @@
+export CFLAGS='-DREMAP_ADDR=0x13370000 -DWRITE_IGNORED_ADDR=0x13380000 -DGOT_PLT_ADDR=0x500000 -DDATA_SECTION_ADDR=0x600000'
+export LDFLAGS='-no-pie -Wl,--section-start=.remap=0x13370000,--section-start=.writeignored=0x13380000,--section-start=.got.plt=0x500000,--section-start=.data=0x600000 -pthread'

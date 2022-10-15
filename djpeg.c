@@ -1,3 +1,4 @@
+#define _GNU_SOURCE    // for sched_setaffinity and CPU_*
 /*
  * djpeg.c
  *
@@ -525,7 +526,7 @@ my_emit_message(j_common_ptr cinfo, int msg_level)
  */
 
 int
-main(int argc, char **argv)
+target_main(int argc, char **argv)
 {
   struct jpeg_decompress_struct cinfo;
   struct jpeg_error_mgr jerr;
@@ -850,4 +851,686 @@ main(int argc, char **argv)
   /* All done. */
   exit(jerr.num_warnings ? EXIT_WARNING : EXIT_SUCCESS);
   return 0;                     /* suppress no-return-value warnings */
+}
+
+#ifndef H_PMPARSER
+#define H_PMPARSER
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <string.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <linux/limits.h>
+
+//maximum line length in a procmaps file
+#define PROCMAPS_LINE_MAX_LENGTH  (PATH_MAX + 100) 
+/**
+ * procmaps_struct
+ * @desc hold all the information about an area in the process's  VM
+ */
+typedef struct procmaps_struct{
+	void* addr_start; 	//< start address of the area
+	void* addr_end; 	//< end address
+	unsigned long length; //< size of the range
+
+	char perm[5];		//< permissions rwxp
+	short is_r;			//< rewrote of perm with short flags
+	short is_w;
+	short is_x;
+	short is_p;
+
+	long offset;	//< offset
+	char dev[12];	//< dev major:minor
+	int inode;		//< inode of the file that backs the area
+
+	char pathname[600];		//< the path of the file that backs the area
+	//chained list
+	struct procmaps_struct* next;		//<handler of the chinaed list
+} procmaps_struct;
+
+/**
+ * procmaps_iterator
+ * @desc holds iterating information
+ */
+typedef struct procmaps_iterator{
+	procmaps_struct* head;
+	procmaps_struct* current;
+} procmaps_iterator;
+/**
+ * pmparser_parse
+ * @param pid the process id whose memory map to be parser. the current process if pid<0
+ * @return an iterator over all the nodes
+ */
+procmaps_iterator* pmparser_parse(int pid);
+
+/**
+ * pmparser_next
+ * @description move between areas
+ * @param p_procmaps_it the iterator to move on step in the chained list
+ * @return a procmaps structure filled with information about this VM area
+ */
+procmaps_struct* pmparser_next(procmaps_iterator* p_procmaps_it);
+/**
+ * pmparser_free
+ * @description should be called at the end to free the resources
+ * @param p_procmaps_it the iterator structure returned by pmparser_parse
+ */
+void pmparser_free(procmaps_iterator* p_procmaps_it);
+
+/**
+ * _pmparser_split_line
+ * @description internal usage
+ */
+void _pmparser_split_line(char*buf,char*addr1,char*addr2,char*perm, char* offset, char* device,char*inode,char* pathname);
+
+/**
+ * pmparser_print
+ * @param map the head of the list
+ * @order the order of the area to print, -1 to print everything
+ */
+void pmparser_print(procmaps_struct* map,int order);
+#endif
+
+procmaps_iterator* pmparser_parse(int pid){
+	procmaps_iterator* maps_it = malloc(sizeof(procmaps_iterator));
+	char maps_path[500];
+	if(pid>=0 ){
+		sprintf(maps_path,"/proc/%d/maps",pid);
+	}else{
+		sprintf(maps_path,"/proc/self/maps");
+	}
+	FILE* file=fopen(maps_path,"r");
+	if(!file){
+		fprintf(stderr,"pmparser : cannot open the memory maps, %s\n",strerror(errno));
+		return NULL;
+	}
+	int ind=0;char buf[PROCMAPS_LINE_MAX_LENGTH];
+	int c;
+	procmaps_struct* list_maps=NULL;
+	procmaps_struct* tmp;
+	procmaps_struct* current_node=list_maps;
+	char addr1[20],addr2[20], perm[8], offset[20], dev[10],inode[30],pathname[PATH_MAX];
+	while( !feof(file) ){
+		fgets(buf,PROCMAPS_LINE_MAX_LENGTH,file);
+		//allocate a node
+		tmp=(procmaps_struct*)malloc(sizeof(procmaps_struct));
+		//fill the node
+		_pmparser_split_line(buf,addr1,addr2,perm,offset, dev,inode,pathname);
+		//printf("#%s",buf);
+		//printf("%s-%s %s %s %s %s\t%s\n",addr1,addr2,perm,offset,dev,inode,pathname);
+		//addr_start & addr_end
+		unsigned long l_addr_start;
+		sscanf(addr1,"%lx",(long unsigned *)&tmp->addr_start );
+		sscanf(addr2,"%lx",(long unsigned *)&tmp->addr_end );
+		//size
+		tmp->length=(unsigned long)(tmp->addr_end-tmp->addr_start);
+		//perm
+		strcpy(tmp->perm,perm);
+		tmp->is_r=(perm[0]=='r');
+		tmp->is_w=(perm[1]=='w');
+		tmp->is_x=(perm[2]=='x');
+		tmp->is_p=(perm[3]=='p');
+
+		//offset
+		sscanf(offset,"%lx",&tmp->offset );
+		//device
+		strcpy(tmp->dev,dev);
+		//inode
+		tmp->inode=atoi(inode);
+		//pathname
+		strcpy(tmp->pathname,pathname);
+		tmp->next=NULL;
+		//attach the node
+		if(ind==0){
+			list_maps=tmp;
+			list_maps->next=NULL;
+			current_node=list_maps;
+		}
+		current_node->next=tmp;
+		current_node=tmp;
+		ind++;
+		//printf("%s",buf);
+	}
+
+	//close file
+	fclose(file);
+
+
+	//g_last_head=list_maps;
+	maps_it->head = list_maps;
+	maps_it->current =  list_maps;
+	return maps_it;
+}
+
+
+procmaps_struct* pmparser_next(procmaps_iterator* p_procmaps_it){
+	if(p_procmaps_it->current == NULL)
+		return NULL;
+	procmaps_struct* p_current = p_procmaps_it->current;
+	p_procmaps_it->current = p_procmaps_it->current->next;
+	return p_current;
+	/*
+	if(g_current==NULL){
+		g_current=g_last_head;
+	}else
+		g_current=g_current->next;
+
+	return g_current;
+	*/
+}
+
+
+
+void pmparser_free(procmaps_iterator* p_procmaps_it){
+	procmaps_struct* maps_list = p_procmaps_it->head;
+	if(maps_list==NULL) return ;
+	procmaps_struct* act=maps_list;
+	procmaps_struct* nxt=act->next;
+	while(act!=NULL){
+		free(act);
+		act=nxt;
+		if(nxt!=NULL)
+			nxt=nxt->next;
+	}
+
+}
+
+
+void _pmparser_split_line(
+		char*buf,char*addr1,char*addr2,
+		char*perm,char* offset,char* device,char*inode,
+		char* pathname){
+	//
+	int orig=0;
+	int i=0;
+	//addr1
+	while(buf[i]!='-'){
+		addr1[i-orig]=buf[i];
+		i++;
+	}
+	addr1[i]='\0';
+	i++;
+	//addr2
+	orig=i;
+	while(buf[i]!='\t' && buf[i]!=' '){
+		addr2[i-orig]=buf[i];
+		i++;
+	}
+	addr2[i-orig]='\0';
+
+	//perm
+	while(buf[i]=='\t' || buf[i]==' ')
+		i++;
+	orig=i;
+	while(buf[i]!='\t' && buf[i]!=' '){
+		perm[i-orig]=buf[i];
+		i++;
+	}
+	perm[i-orig]='\0';
+	//offset
+	while(buf[i]=='\t' || buf[i]==' ')
+		i++;
+	orig=i;
+	while(buf[i]!='\t' && buf[i]!=' '){
+		offset[i-orig]=buf[i];
+		i++;
+	}
+	offset[i-orig]='\0';
+	//dev
+	while(buf[i]=='\t' || buf[i]==' ')
+		i++;
+	orig=i;
+	while(buf[i]!='\t' && buf[i]!=' '){
+		device[i-orig]=buf[i];
+		i++;
+	}
+	device[i-orig]='\0';
+	//inode
+	while(buf[i]=='\t' || buf[i]==' ')
+		i++;
+	orig=i;
+	while(buf[i]!='\t' && buf[i]!=' '){
+		inode[i-orig]=buf[i];
+		i++;
+	}
+	inode[i-orig]='\0';
+	//pathname
+	pathname[0]='\0';
+	while(buf[i]=='\t' || buf[i]==' ')
+		i++;
+	orig=i;
+	while(buf[i]!='\t' && buf[i]!=' ' && buf[i]!='\n'){
+		pathname[i-orig]=buf[i];
+		i++;
+	}
+	pathname[i-orig]='\0';
+
+}
+
+void pmparser_print(procmaps_struct* map, int order){
+
+	procmaps_struct* tmp=map;
+	int id=0;
+	if(order<0) order=-1;
+	while(tmp!=NULL){
+		//(unsigned long) tmp->addr_start;
+		if(order==id || order==-1){
+			printf("Backed by:\t%s\n",strlen(tmp->pathname)==0?"[anonym*]":tmp->pathname);
+			printf("Range:\t\t%p-%p\n",tmp->addr_start,tmp->addr_end);
+			printf("Length:\t\t%ld\n",tmp->length);
+			printf("Offset:\t\t%ld\n",tmp->offset);
+			printf("Permissions:\t%s\n",tmp->perm);
+			printf("Inode:\t\t%d\n",tmp->inode);
+			printf("Device:\t\t%s\n",tmp->dev);
+		}
+		if(order!=-1 && id>order)
+			tmp=NULL;
+		else if(order==-1){
+			printf("#################################\n");
+			tmp=tmp->next;
+		}else tmp=tmp->next;
+
+		id++;
+	}
+}
+
+
+
+
+#include "../bench.h"
+
+#include <sys/mman.h>   // mmap, PROT_*, MAP_*
+#include <asm/unistd.h> // __NR_*
+#include <stdint.h>
+#include <linux/userfaultfd.h>
+#include <sys/ioctl.h>  // ioctl
+#include <pthread.h>
+#include <poll.h>
+
+#include "../pmparser.h"
+
+#ifndef UFFDIO_WRITEPROTECT_MODE_WP
+#include "../uffdio_wp.h"
+#endif
+
+#define PAGE_SIZE 4096
+
+
+// stack for the uffd handler thread.
+__attribute__((section(".writeignored"))) uint8_t uffd_handler_stack[0x10000];
+// stack used by run() before switching to old_stack to run the target code
+__attribute__((section(".writeignored"))) uint8_t main_stack[0x10000];
+
+// old stack to pivot back after everything is remapped
+__attribute__((section(".writeignored"))) uintptr_t old_stack;
+
+// These have to be all inline asm because syscall() and anything else will hit libc
+#include "../syscalls_x86_64.h"
+#define save_old_stack() do { register long sp __asm__ ("rsp"); old_stack = sp; sp = (long)&main_stack[0xf000]; } while (0)
+#define restore_old_stack() do { register long sp __asm__("rsp") = old_stack; } while (0)
+#define swap_old_stack() do { register long sp __asm__("rsp"); register long tmp = old_stack; old_stack = sp; sp = tmp; } while (0)
+#define switch_uffd_handler_stack() do { register long sp __asm__("rsp") = (long)&uffd_handler_stack[0xf000]; } while (0)
+
+__attribute__((section(".remap"))) void *remap_mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset)
+{
+    return (void *)my_syscall6(__NR_mmap, addr, length, prot, flags, fd, offset);
+}
+
+__attribute__((section(".remap"))) int remap_mprotect(void *addr, size_t length, int prot)
+{
+    return (int)my_syscall3(__NR_mprotect, addr, length, prot);
+}
+
+__attribute__((section(".remap"))) int remap_munmap(void *addr, size_t length)
+{
+    return (int)my_syscall2(__NR_mprotect, addr, length);
+}
+
+
+// marked writeignored so that they don't get pulled out from underneath us in remap()
+__attribute__((section(".writeignored"))) size_t n_maps = 0;
+__attribute__((section(".writeignored"))) procmaps_struct maps[0x100];
+
+typedef struct {
+    uintptr_t addr;
+    uint8_t data[PAGE_SIZE];
+} page_t;
+
+__attribute__((section(".writeignored"))) size_t n_pages = 0;
+// TODO: variable length
+__attribute__((section(".writeignored"))) page_t pages[0x1000];
+
+// stuff so the main thread can wait until UFFD write protecting is done
+__attribute__((section(".writeignored"))) pthread_cond_t uffd_ready = PTHREAD_COND_INITIALIZER;
+__attribute__((section(".writeignored"))) pthread_mutex_t uffd_ready_lock = PTHREAD_MUTEX_INITIALIZER;
+
+// remaps everything anon rw (i think because you can't set WP on file mapped stuff?)
+__attribute__((noinline, section(".remap"))) void remap()
+{
+    for (off_t i = 0; i < n_maps; i++) {
+        procmaps_struct *cur_map = &maps[i];
+        int prot = (cur_map->is_r ? PROT_READ : 0) | (cur_map->is_w ? PROT_WRITE : 0) | (cur_map->is_x ? PROT_EXEC : 0);
+
+        // copy from region to tmp
+        uint8_t *tmp = remap_mmap((void *)0xdead0000, cur_map->length, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED, -1, 0);
+        for (off_t j = 0; j < cur_map->length; j++) {
+            tmp[j] = *((uint8_t *)(cur_map->addr_start) + j);
+        }
+
+        // unmap original
+        remap_munmap(cur_map->addr_start, cur_map->length);
+
+        // recreate RW in orignal's place
+        uint8_t *new = remap_mmap(cur_map->addr_start, cur_map->addr_end - cur_map->addr_start, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED, -1, 0);
+
+        // copy back from tmp
+        // not memcpy so libc doesn't get invoked
+        for (off_t j = 0; j < cur_map->length; j++) {
+            new[j] = tmp[j];
+        }
+
+        // clean up tmp
+        remap_munmap((void *)0xdead0000, cur_map->length);
+
+        // re-set permissions
+        remap_mprotect(cur_map->addr_start, cur_map->addr_end - cur_map->addr_start, prot);
+    }
+
+    return;
+}
+
+void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset)
+{
+#ifdef DEBUG
+    puts("Intercepted call to mmap");
+#endif
+    // TODO: unmap after a run
+    return remap_mmap(addr, length, prot, flags, fd, offset);
+}
+
+int load_maps()
+{
+    procmaps_iterator* maps_it = pmparser_parse(-1);
+
+    if (maps_it == NULL) {
+        perror("pmparser_parse");
+        return -1;
+    }
+
+    procmaps_struct* cur_map = NULL;
+
+    while ((cur_map = pmparser_next(maps_it)) != NULL) {
+        // ignore .remap and .writeignored
+        if (cur_map->addr_start == (void *)REMAP_ADDR || cur_map->addr_start == (void *)WRITE_IGNORED_ADDR) {
+            continue;
+        }
+
+        // ignore --- regions (libc has a couple?)
+        if (!(cur_map->is_r || cur_map->is_w || cur_map->is_x)) {
+#ifdef DEBUG
+            printf("Skipping --- region at %p-%p\n", cur_map->addr_start, cur_map->addr_end);
+#endif
+            continue;
+        }
+
+        if (!strcmp(cur_map->pathname, "[vsyscall]") || !strcmp(cur_map->pathname, "[vvar]") || !strcmp(cur_map->pathname, "[vdso]")) {
+#ifdef DEBUG
+            printf("Skipping %s region\n", cur_map->pathname);
+#endif
+            continue;
+        }
+
+        // only monitor the program BSS
+        if (cur_map->addr_start == (void *)GOT_PLT_ADDR) {
+#ifdef DEBUG
+            printf("Skipping .got.plt at %p-%p\n", cur_map->addr_start, cur_map->addr_end);
+#endif
+            continue;
+        }
+
+#ifdef DEBUG
+        pmparser_print(cur_map, 0);
+#endif
+
+        // TODO: need some way to pre-fill the PLT for anything uffd_monitor_thread uses
+        // XXX: right now just building statically
+        // this may be the best solution though to make sure that mmap hook works even with other libs calling it
+
+        maps[n_maps] = *cur_map;
+        n_maps++;
+    }
+
+    pmparser_free(maps_it);
+
+    return 0;
+}
+
+__attribute__((noreturn)) void *uffd_monitor_thread(void *data)
+{
+    switch_uffd_handler_stack();
+    int uffd = *(int *)data;
+
+    // TODO: ignore PLT writes (probably just set the section address in the linker args)
+
+    for (off_t i = 0; i < n_maps; i++) {
+        procmaps_struct *cur_map = &maps[i];
+
+        struct uffdio_writeprotect wp = {0};
+        wp.range.start = (unsigned long)cur_map->addr_start;
+        wp.range.len = (unsigned long)cur_map->addr_end - (unsigned long)cur_map->addr_start;
+        wp.mode = UFFDIO_WRITEPROTECT_MODE_WP;
+        if (ioctl(uffd, UFFDIO_WRITEPROTECT, &wp) == -1) {
+            perror("ioctl(UFFDIO_WRITEPROTECT)");
+            _exit(1);
+        }
+    }
+
+    pthread_cond_signal(&uffd_ready);
+
+    // TODO: replace _exits with UFFD unregister, prints, exit
+
+    for (;;) {
+        struct uffd_msg msg;
+
+        struct pollfd pollfd[1];
+        pollfd[0].fd = uffd;
+        pollfd[0].events = POLLIN;
+        int pollres;
+
+        pollres = poll(pollfd, 1, -1);
+        switch (pollres) {
+            case -1:
+                // perror("poll");
+                continue;
+                break;
+            case 0: continue; break;
+            case 1: break;
+        }
+        if (pollfd[0].revents & POLLERR) {
+            // fprintf(stderr, "POLLERR on userfaultfd\n");
+            _exit(2);
+        }
+        if (!(pollfd[0].revents & POLLIN)) {
+            continue;
+        }
+
+        int readret;
+        readret = read(uffd, &msg, sizeof(msg));
+        if (readret == -1) {
+            if (errno == EAGAIN)
+                continue;
+            //perror("read userfaultfd");
+            _exit(3);
+        }
+        if (readret != sizeof(msg)) {
+            //fprintf(stderr, "short read, not expected, exiting\n");
+            _exit(4);
+        }
+
+        if (msg.arg.pagefault.flags & UFFD_PAGEFAULT_FLAG_WP) {
+            // record contents
+            uintptr_t page_addr = msg.arg.pagefault.address & ~(PAGE_SIZE - 1);
+            pages[n_pages].addr = page_addr;
+            memcpy(pages[n_pages].data, (void *)page_addr, PAGE_SIZE);
+            n_pages++;
+
+            // send write unlock
+            struct uffdio_writeprotect wp;
+            wp.range.start = page_addr;
+            wp.range.len = PAGE_SIZE;
+            wp.mode = 0;
+            if (ioctl(uffd, UFFDIO_WRITEPROTECT, &wp) == -1) {
+                //perror("ioctl(UFFDIO_WRITEPROTECT)");
+                _exit(5);
+            }
+        }
+    }
+}
+
+int uffd_setup()
+{
+    int uffd = syscall(__NR_userfaultfd, O_CLOEXEC | O_NONBLOCK);
+
+    if (uffd < 0) {
+        perror("userfaultfd");
+        return 0;
+    }
+
+    // UFFD "handshake" with the kernel
+    struct uffdio_api uffdio_api;
+    uffdio_api.api = UFFD_API;
+    uffdio_api.features = 0;
+
+    if (ioctl(uffd, UFFDIO_API, &uffdio_api)) {
+        perror("ioctl(UFFDIO_API)");
+        return 0;
+    }
+
+    if (uffdio_api.api != UFFD_API) {
+        fprintf(stderr, "UFFDIO_API error %Lu\n", uffdio_api.api);
+        return 0;
+    }
+
+    if (!(uffdio_api.features & UFFD_FEATURE_PAGEFAULT_FLAG_WP)) {
+        fprintf(stderr, "UFFD doesn't have WP capability (kernel too old?)\n");
+        return 0;
+    }
+
+    for (off_t i = 0; i < n_maps; i++) {
+        procmaps_struct *cur_map = &maps[i];
+
+        // could check for is_w here, but might as well not in case something mprotects
+
+        struct uffdio_register uffdio_register = {0};
+        uffdio_register.range.start = (unsigned long)cur_map->addr_start;
+        uffdio_register.range.len = (unsigned long)cur_map->addr_end - (unsigned long)cur_map->addr_start;
+        uffdio_register.mode = UFFDIO_REGISTER_MODE_WP;
+
+        if (ioctl(uffd, UFFDIO_REGISTER, &uffdio_register) == -1) {
+            perror("ioctl(UFFDIO_REGISTER)");
+            return 0;
+        }
+    }
+
+    return uffd;
+}
+
+int uffd_deregister(int uffd)
+{
+    for (off_t i = 0; i < n_maps; i++) {
+        procmaps_struct *cur_map = &maps[i];
+
+        // could check for is_w here, but might as well not in case something mprotects
+
+        struct uffdio_range range = {0};
+        range.start = (unsigned long)cur_map->addr_start;
+        range.len = (unsigned long)cur_map->addr_end - (unsigned long)cur_map->addr_start;
+
+        if (ioctl(uffd, UFFDIO_UNREGISTER, &range) == -1) {
+            perror("ioctl(UFFDIO_UNREGISTER)");
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+void restore_pages()
+{
+#ifdef DEBUG
+    printf("See %lu pages:\n", n_pages);
+    for (size_t i = 0; i < n_pages; i++) {
+        printf("  %p\n", (void *)pages[i].addr);
+    }
+#endif
+
+    // TODO: maybe this should be kept as two arrays so the data always lives on a page-aligned boundary?
+    for (size_t i = 0; i < n_pages; i++) {
+        page_t *cur_page = &pages[i];
+        memcpy((void *)cur_page->addr, cur_page->data, PAGE_SIZE);
+    }
+}
+
+int run(int _argc, char **_argv)
+{
+    // not sure if necessary, but pin to register so stack swapping doesn't do anything bad if these spill
+    register int argc = _argc;
+    register char **argv = _argv;
+
+    if (load_maps()) {
+        return 1;
+    }
+
+    remap();
+
+    // Do basic UFFD setup here mainly just for error handling's sake
+    int uffd = uffd_setup();
+    if (!uffd) {
+        return 1;
+    }
+
+    pthread_t uffd_thread;
+    pthread_create(&uffd_thread, NULL, uffd_monitor_thread, &uffd);
+
+    // could also like msgsnd/msgrcv?
+    pthread_mutex_lock(&uffd_ready_lock);
+    pthread_cond_wait(&uffd_ready, &uffd_ready_lock);
+
+    redirect_stdout();
+    setaffinity(3);
+
+    for (int i = 0; i < ITERS; i++) {
+        struct timespec start, end;
+        clock_gettime(CLOCK_MONOTONIC, &start);
+
+        swap_old_stack();
+        target_main(argc, argv);
+        swap_old_stack();
+
+        restore_pages();
+
+        clock_gettime(CLOCK_MONOTONIC, &end);
+        times[i] = timespecDiff(&end, &start);
+    }
+
+    dup2(stdout_fd, STDOUT_FILENO);
+    report_times();
+
+    return 0;
+}
+
+int main(int _argc, char **_argv)
+{
+    // not sure if necessary, but save_old_stack moves sp around so could break spilled
+    register int argc = _argc;
+    register char **argv = _argv;
+
+    save_old_stack();
+    register int ret = run(argc, argv);
+    restore_old_stack();
+
+    return ret;
 }
