@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 /*
  * djpeg.c
  *
@@ -525,7 +526,7 @@ my_emit_message(j_common_ptr cinfo, int msg_level)
  */
 
 int
-main(int argc, char **argv)
+target_main(int argc, char **argv)
 {
   struct jpeg_decompress_struct cinfo;
   struct jpeg_error_mgr jerr;
@@ -851,3 +852,31 @@ main(int argc, char **argv)
   exit(jerr.num_warnings ? EXIT_WARNING : EXIT_SUCCESS);
   return 0;                     /* suppress no-return-value warnings */
 }
+
+#include "../bench.h"
+
+#include <stdio.h>     // perror
+#include <stdlib.h>    // exit
+#include <sys/types.h> // pid_t
+#include <unistd.h>    // fork, execve
+#include <sys/wait.h>  // wait
+
+void run_one(int argc, char **argv)
+{
+    pid_t pid = fork();
+    if (pid < 0) {
+        perror("fork");
+        exit(1);
+    }
+    if (pid == 0) {
+        // child
+        target_main(argc, argv);
+        _exit(1);
+    } else {
+        wait(NULL);
+    }
+}
+
+BENCH_MAIN({
+    run_one(argc, argv);
+})
