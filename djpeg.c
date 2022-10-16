@@ -849,7 +849,6 @@ target_main(int argc, char **argv)
     free(inbuffer);
 
   /* All done. */
-  exit(jerr.num_warnings ? EXIT_WARNING : EXIT_SUCCESS);
   return 0;                     /* suppress no-return-value warnings */
 }
 
@@ -1186,7 +1185,7 @@ __attribute__((section(".remap"))) int remap_mprotect(void *addr, size_t length,
 
 __attribute__((section(".remap"))) int remap_munmap(void *addr, size_t length)
 {
-    return (int)my_syscall2(__NR_mprotect, addr, length);
+    return (int)my_syscall2(__NR_munmap, addr, length);
 }
 
 
@@ -1312,6 +1311,7 @@ __attribute__((noreturn)) void *uffd_monitor_thread(void *data)
 {
     switch_uffd_handler_stack();
     int uffd = *(int *)data;
+    write(2, "got uffd\n", 9);
 
     // TODO: ignore PLT writes (probably just set the section address in the linker args)
 
@@ -1329,6 +1329,7 @@ __attribute__((noreturn)) void *uffd_monitor_thread(void *data)
     }
 
     pthread_cond_signal(&uffd_ready);
+    write(2, "uffd is go\n", 11);
 
     // TODO: replace _exits with UFFD unregister, prints, exit
 

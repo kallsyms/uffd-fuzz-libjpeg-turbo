@@ -686,10 +686,17 @@ if(ENABLE_STATIC)
   set_property(TARGET cjpeg-static PROPERTY COMPILE_FLAGS ${COMPILE_FLAGS})
   target_link_libraries(cjpeg-static jpeg-static)
 
+  set(CMAKE_THREAD_PREFER_PTHREAD ON)
+  set(THREADS_PREFER_PTHREAD_FLAG ON)
+  find_package(Threads REQUIRED)
+
   add_executable(djpeg-static djpeg.c cdjpeg.c rdcolmap.c rdswitch.c wrgif.c
     wrppm.c ${DJPEG_BMP_SOURCES})
   set_property(TARGET djpeg-static PROPERTY COMPILE_FLAGS ${COMPILE_FLAGS})
-  target_link_libraries(djpeg-static jpeg-static)
+  # set_property(TARGET djpeg-static PROPERTY POSITION_INDEPENDENT_CODE FALSE)
+  target_link_options(djpeg-static PUBLIC "-no-pie")
+  target_link_options(djpeg-static PUBLIC "-static")
+  target_link_libraries(djpeg-static jpeg-static Threads::Threads)
 
   add_executable(jpegtran-static jpegtran.c cdjpeg.c rdswitch.c transupp.c)
   target_link_libraries(jpegtran-static jpeg-static)
