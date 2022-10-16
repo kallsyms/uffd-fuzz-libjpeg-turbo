@@ -1475,11 +1475,13 @@ void restore_pages()
     }
 }
 
-int run(int _argc, char **_argv)
+int main(int _argc, char **_argv)
 {
     // not sure if necessary, but pin to register so stack swapping doesn't do anything bad if these spill
     register int argc = _argc;
     register char **argv = _argv;
+
+    save_old_stack();
 
     if (load_maps()) {
         return 1;
@@ -1520,18 +1522,7 @@ int run(int _argc, char **_argv)
     dup2(stdout_fd, STDOUT_FILENO);
     report_times();
 
-    return 0;
-}
-
-int main(int _argc, char **_argv)
-{
-    // not sure if necessary, but save_old_stack moves sp around so could break spilled
-    register int argc = _argc;
-    register char **argv = _argv;
-
-    save_old_stack();
-    register int ret = run(argc, argv);
     restore_old_stack();
 
-    return ret;
+    return 0;
 }
