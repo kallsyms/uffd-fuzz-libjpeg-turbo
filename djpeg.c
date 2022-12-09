@@ -1160,18 +1160,18 @@ void pmparser_print(procmaps_struct* map, int order){
 
 // stack for the uffd handler thread.
 __attribute__((section(".writeignored"))) uint8_t uffd_handler_stack[0x10000];
-// stack used by run() before switching to old_stack to run the target code
-__attribute__((section(".writeignored"))) uint8_t main_stack[0x10000];
+// stack used by run() before switching to target_stack to run the target code
+__attribute__((section(".writeignored"))) uint8_t loop_stack[0x10000];
 
-// old stack to pivot back after everything is remapped
-__attribute__((section(".writeignored"))) uintptr_t old_stack;
+// the stack that this program was started with, which will be pivoted back to to run the target
+__attribute__((section(".writeignored"))) uintptr_t target_stack;
 
 // These have to be all inline asm because syscall() and anything else will hit libc
 #include "../syscalls_x86_64.h"
-#define save_old_stack() do { register long sp __asm__ ("rsp"); old_stack = sp; sp = (long)&main_stack[0xf000]; } while (0)
-#define restore_old_stack() do { register long sp __asm__("rsp") = old_stack; } while (0)
-#define swap_old_stack() do { register long sp __asm__("rsp"); register long tmp = old_stack; old_stack = sp; sp = tmp; } while (0)
-#define switch_uffd_handler_stack() do { register long sp __asm__("rsp") = (long)&uffd_handler_stack[0xf000]; } while (0)
+#define save_target_stack_and_pivot() do { volatile register long sp __asm__ ("rsp"); target_stack = sp; sp = (long)&loop_stack[0xf000]; asm volatile ("" ::: "memory" );} while (0)
+#define restore_target_stack() do { volatile register long sp __asm__("rsp") = target_stack; asm volatile ("" ::: "memory" ); } while (0)
+#define swap_target_stack() do { volatile register long sp __asm__("rsp"); register long tmp = target_stack; target_stack = sp; sp = tmp; asm volatile ("" ::: "memory" ); } while (0)
+#define switch_uffd_handler_stack() do { volatile register long sp __asm__("rsp") = (long)&uffd_handler_stack[0xf000]; asm volatile ("" ::: "memory" ); } while (0)
 
 __attribute__((section(".remap"))) void *remap_mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset)
 {
@@ -1206,7 +1206,7 @@ __attribute__((section(".writeignored"))) page_t pages[0x1000];
 __attribute__((section(".writeignored"))) pthread_cond_t uffd_ready = PTHREAD_COND_INITIALIZER;
 __attribute__((section(".writeignored"))) pthread_mutex_t uffd_ready_lock = PTHREAD_MUTEX_INITIALIZER;
 
-// remaps everything anon rw (i think because you can't set WP on file mapped stuff?)
+// remaps everything anon rw because you can't WP on file-mapped memory
 __attribute__((noinline, section(".remap"))) void remap()
 {
     for (off_t i = 0; i < n_maps; i++) {
@@ -1243,9 +1243,7 @@ __attribute__((noinline, section(".remap"))) void remap()
 
 void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset)
 {
-#ifdef DEBUG
     puts("Intercepted call to mmap");
-#endif
     // TODO: unmap after a run
     return remap_mmap(addr, length, prot, flags, fd, offset);
 }
@@ -1307,11 +1305,10 @@ int load_maps()
     return 0;
 }
 
-__attribute__((noreturn)) void *uffd_monitor_thread(void *data)
+void *uffd_monitor_thread(void *data)
 {
     switch_uffd_handler_stack();
     int uffd = *(int *)data;
-    write(2, "got uffd\n", 9);
 
     // TODO: ignore PLT writes (probably just set the section address in the linker args)
 
@@ -1329,7 +1326,6 @@ __attribute__((noreturn)) void *uffd_monitor_thread(void *data)
     }
 
     pthread_cond_signal(&uffd_ready);
-    write(2, "uffd is go\n", 11);
 
     // TODO: replace _exits with UFFD unregister, prints, exit
 
@@ -1346,8 +1342,7 @@ __attribute__((noreturn)) void *uffd_monitor_thread(void *data)
             case -1:
                 // perror("poll");
                 continue;
-                break;
-            case 0: continue; break;
+            case 0: continue;
             case 1: break;
         }
         if (pollfd[0].revents & POLLERR) {
@@ -1475,21 +1470,15 @@ void restore_pages()
     }
 }
 
-int main(int _argc, char **_argv)
+__attribute__((noinline)) int nowrite_main(int argc, char **argv)
 {
-    // not sure if necessary, but pin to register so stack swapping doesn't do anything bad if these spill
-    register int argc = _argc;
-    register char **argv = _argv;
-
-    save_old_stack();
-
+    // Now in the "safe" stack which won't be write monitored
     if (load_maps()) {
         return 1;
     }
 
     remap();
 
-    // Do basic UFFD setup here mainly just for error handling's sake
     int uffd = uffd_setup();
     if (!uffd) {
         return 1;
@@ -1509,9 +1498,9 @@ int main(int _argc, char **_argv)
         struct timespec start, end;
         clock_gettime(CLOCK_MONOTONIC, &start);
 
-        swap_old_stack();
+        swap_target_stack();
         target_main(argc, argv);
-        swap_old_stack();
+        swap_target_stack();
 
         restore_pages();
 
@@ -1522,7 +1511,16 @@ int main(int _argc, char **_argv)
     dup2(stdout_fd, STDOUT_FILENO);
     report_times();
 
-    restore_old_stack();
-
     return 0;
+}
+
+int main(int argc, char **argv)
+{
+    // pivot only saves rsp, so go another function deep so rbp relative stack vars are also on the writeignored stack.
+    save_target_stack_and_pivot();
+
+    nowrite_main(argc, argv);
+
+    // Restore before returning so that parent stack frames are where they're expected
+    restore_target_stack();
 }
